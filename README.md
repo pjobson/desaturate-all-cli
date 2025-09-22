@@ -1,4 +1,4 @@
-# Desaturate All CLI
+# Desaturate All CLI (Cinnamon DE)
 
 A command-line interface for controlling screen desaturation effects in the Cinnamon desktop environment. This tool provides an easy way to enable grayscale mode, adjust saturation levels, and manage automatic scheduling from the terminal.
 
