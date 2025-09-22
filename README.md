@@ -2,6 +2,33 @@
 
 A command-line interface for controlling screen desaturation effects in the Cinnamon desktop environment. This tool provides an easy way to enable grayscale mode, adjust saturation levels, and manage automatic scheduling from the terminal.
 
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Installing the CLI](#installing-the-cli)
+    - [Bash Completion (Optional)](#bash-completion-optional)
+- [Usage](#usage)
+    - [Basic Commands](#basic-commands)
+    - [Saturation Control](#saturation-control)
+    - [Automatic Scheduling](#automatic-scheduling)
+    - [Running Without Arguments](#running-without-arguments)
+- [Configuration](#configuration)
+    - [Configuration Options](#configuration-options)
+- [Examples](#examples)
+    - [Basic Usage](#basic-usage)
+    - [Night Mode Setup](#night-mode-setup)
+    - [Fade Animations](#fade-animations)
+    - [Startup Integration](#startup-integration)
+- [Troubleshooting](#troubleshooting)
+    - [Common Issues](#common-issues)
+    - [Debug Mode](#debug-mode)
+- [Uninstallation](#uninstallation)
+- [How It Works](#how-it-works)
+- [License](#license)
+- [Citation](#citation)
+
 ## Features
 
 - **Toggle desaturation on/off** - Instantly switch between color and grayscale
