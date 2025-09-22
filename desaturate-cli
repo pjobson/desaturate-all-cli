@@ -1,0 +1,465 @@
+#!/bin/bash
+
+# Desaturate All CLI
+# Command-line interface for the Cinnamon desaturate-all applet
+# Author: Claude Code
+
+APPLET_UUID="desaturate-all@hkoosha"
+SETTINGS_PATH="org.cinnamon.desktop.applets"
+CINNAMON_DBUS="org.Cinnamon"
+CONFIG_DIR="$HOME/.config/desaturate"
+CONFIG_FILE="$CONFIG_DIR/settings.json"
+
+# Config management functions
+ensure_config_exists() {
+    if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR"
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << EOF
+{
+    "enabled": false,
+    "saturation": 0,
+    "automatic": false,
+    "start_time": "22:00",
+    "end_time": "06:00",
+    "resume_on_startup": false
+}
+EOF
+    fi
+}
+
+get_config_value() {
+    local key="$1"
+    ensure_config_exists
+    jq -r ".$key" "$CONFIG_FILE" 2>/dev/null || echo "null"
+}
+
+set_config_value() {
+    local key="$1"
+    local value="$2"
+    ensure_config_exists
+
+    # Create temp file with updated value
+    local temp_file=$(mktemp)
+    jq ".$key = $value" "$CONFIG_FILE" > "$temp_file" && mv "$temp_file" "$CONFIG_FILE"
+}
+
+show_help() {
+    cat << EOF
+Desaturate All CLI - Control screen desaturation from command line
+
+Usage: $0 [COMMAND] [OPTIONS]
+
+Commands:
+    on                  Enable desaturation effect
+    off                 Disable desaturation effect
+    toggle              Toggle desaturation effect
+    status              Show current status
+    saturation <value>  Set saturation level (0-100)
+    auto on|off         Enable/disable automatic scheduling
+    schedule <start> <end>  Set automatic schedule (24h format: HH:MM)
+    init                Apply configuration settings
+    test                Test effect detection
+    help                Show this help message
+
+Examples:
+    $0 on               # Enable desaturation
+    $0 off              # Disable desaturation
+    $0 toggle           # Toggle current state
+    $0 saturation 50    # Set 50% saturation
+    $0 auto on          # Enable automatic scheduling
+    $0 schedule 22:00 06:00  # Auto-enable at 22:00, disable at 06:00
+
+EOF
+}
+
+# Function to check if Cinnamon is running
+check_cinnamon() {
+    if ! pgrep -x "cinnamon" > /dev/null; then
+        echo "Error: Cinnamon desktop environment is not running" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Function to get applet instance ID
+get_instance_id() {
+    if ! check_cinnamon; then
+        return 1
+    fi
+    dconf read /org/cinnamon/enabled-applets | grep -o "${APPLET_UUID}:[0-9]*" | head -1 | cut -d: -f2
+}
+
+# Function to get setting value
+get_setting() {
+    local setting="$1"
+    local instance_id=$(get_instance_id)
+    if [ -z "$instance_id" ]; then
+        echo "Error: Applet not found or not enabled" >&2
+        return 1
+    fi
+    dconf read "/org/cinnamon/desktop/applets/${APPLET_UUID}/${instance_id}/${setting}"
+}
+
+# Function to set setting value
+set_setting() {
+    local setting="$1"
+    local value="$2"
+    local instance_id=$(get_instance_id)
+    if [ -z "$instance_id" ]; then
+        echo "Error: Applet not found or not enabled" >&2
+        return 1
+    fi
+    dconf write "/org/cinnamon/desktop/applets/${APPLET_UUID}/${instance_id}/${setting}" "$value"
+}
+
+# Function to check if effect is currently active
+is_effect_active() {
+    local state=$(get_setting "state")
+    [ "$state" = "true" ]
+}
+
+# Function to execute JavaScript in Cinnamon context
+execute_cinnamon_js() {
+    local js_code="$1"
+    dbus-send --session --dest=org.Cinnamon --type=method_call /org/Cinnamon org.Cinnamon.Eval string:"$js_code" 2>/dev/null
+}
+
+# Function to enable desaturation effect
+enable_effect() {
+    local saturation=$(get_config_value "saturation")
+    local factor=$(echo "scale=2; (100-$saturation)/100" | bc -l)
+
+    local js_code="
+    try {
+        const Clutter = imports.gi.Clutter;
+        const Main = imports.ui.main;
+
+        // Find the applet to get its effect object
+        let applets = imports.ui.appletManager.appletObj;
+        let desaturateEffect = null;
+
+        for (let key in applets) {
+            if (key.includes('${APPLET_UUID}')) {
+                let applet = applets[key];
+                if (applet && applet.effect) {
+                    desaturateEffect = applet.effect;
+                    break;
+                }
+            }
+        }
+
+        if (!desaturateEffect) {
+            // Create new effect if applet effect not found
+            desaturateEffect = new Clutter.DesaturateEffect();
+        }
+
+        // Set the saturation factor
+        desaturateEffect.set_factor(${factor});
+
+        // Remove any existing desaturate effects first
+        let effects = Main.uiGroup.get_effects();
+        for (let i = effects.length - 1; i >= 0; i--) {
+            if (effects[i] instanceof Clutter.DesaturateEffect) {
+                Main.uiGroup.remove_effect(effects[i]);
+            }
+        }
+
+        // Add the effect
+        Main.uiGroup.add_effect(desaturateEffect);
+        log('Desaturation effect enabled with factor ${factor}');
+
+    } catch(e) {
+        log('Error enabling desaturation: ' + e);
+    }
+    "
+    execute_cinnamon_js "$js_code"
+
+    # Save state to config
+    set_config_value "enabled" "true"
+}
+
+# Function to disable desaturation effect
+disable_effect() {
+    local js_code="
+    try {
+        const Clutter = imports.gi.Clutter;
+        const Main = imports.ui.main;
+
+        // Remove all desaturate effects
+        let effects = Main.uiGroup.get_effects();
+        let removed = false;
+        for (let i = effects.length - 1; i >= 0; i--) {
+            if (effects[i] instanceof Clutter.DesaturateEffect) {
+                Main.uiGroup.remove_effect(effects[i]);
+                removed = true;
+            }
+        }
+
+        if (removed) {
+            log('Desaturation effect disabled');
+        } else {
+            log('No desaturation effect was active');
+        }
+
+    } catch(e) {
+        log('Error disabling desaturation: ' + e);
+    }
+    "
+    execute_cinnamon_js "$js_code"
+
+    # Save state to config
+    set_config_value "enabled" "false"
+}
+
+# Function to check if effect is currently running
+check_effect_status() {
+    local js_code="
+    const Clutter = imports.gi.Clutter;
+    const Main = imports.ui.main;
+    let effects = Main.uiGroup.get_effects();
+    let hasDesaturate = false;
+    for (let i = 0; i < effects.length; i++) {
+        if (effects[i].constructor.name === 'ClutterDesaturateEffect' ||
+            effects[i].toString().includes('DesaturateEffect')) {
+            hasDesaturate = true;
+            break;
+        }
+    }
+    global.log('EffectCheck: ' + hasDesaturate);
+    hasDesaturate;
+    "
+
+    local result=$(dbus-send --session --dest=org.Cinnamon --type=method_call /org/Cinnamon org.Cinnamon.Eval string:"$js_code" 2>/dev/null)
+
+    # Look for boolean true in the response
+    if echo "$result" | grep -q "boolean true"; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+# Function to toggle effect
+toggle_effect() {
+    local config_enabled=$(get_config_value "enabled")
+    if [ "$config_enabled" = "true" ]; then
+        disable_effect
+        echo "Desaturation effect disabled"
+    else
+        enable_effect
+        echo "Desaturation effect enabled"
+    fi
+}
+
+# Function to show status
+show_status() {
+    echo "=== Desaturate All Status ==="
+
+    local config_enabled=$(get_config_value "enabled")
+    if [ "$config_enabled" = "true" ]; then
+        echo "Effect: Enabled"
+    else
+        echo "Effect: Disabled"
+    fi
+
+    local saturation=$(get_config_value "saturation")
+    echo "Saturation: ${saturation}%"
+
+    local automatic=$(get_config_value "automatic")
+    if [ "$automatic" = "true" ]; then
+        echo "Automatic: Enabled"
+        local start_time=$(get_config_value "start_time")
+        local end_time=$(get_config_value "end_time")
+        echo "Schedule: ${start_time} to ${end_time}"
+    else
+        echo "Automatic: Disabled"
+    fi
+
+    local resume=$(get_config_value "resume_on_startup")
+    if [ "$resume" = "true" ]; then
+        echo "Resume on startup: Enabled"
+    else
+        echo "Resume on startup: Disabled"
+    fi
+}
+
+# Function to set saturation
+set_saturation() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 0 ] || [ "$value" -gt 100 ]; then
+        echo "Error: Saturation must be a number between 0 and 100" >&2
+        return 1
+    fi
+
+    # Save to config first
+    set_config_value "saturation" "$value"
+
+    # Always enable the effect when setting saturation
+    enable_effect > /dev/null
+
+    echo "Saturation set to ${value}% and effect enabled"
+}
+
+# Function to set automatic mode
+set_automatic() {
+    local mode="$1"
+    case "$mode" in
+        on|true|1)
+            set_config_value "automatic" "true"
+            echo "Automatic scheduling enabled"
+            ;;
+        off|false|0)
+            set_config_value "automatic" "false"
+            echo "Automatic scheduling disabled"
+            ;;
+        *)
+            echo "Error: Invalid automatic mode. Use 'on' or 'off'" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Function to set schedule
+set_schedule() {
+    local start_time="$1"
+    local end_time="$2"
+
+    # Validate time format (HH:MM)
+    if [[ ! "$start_time" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || [[ ! "$end_time" =~ ^[0-2][0-9]:[0-5][0-9]$ ]]; then
+        echo "Error: Invalid time format. Use HH:MM (24-hour format)" >&2
+        return 1
+    fi
+
+    # Extract hours and minutes
+    local start_h=$(echo "$start_time" | cut -d: -f1)
+    local start_m=$(echo "$start_time" | cut -d: -f2)
+    local end_h=$(echo "$end_time" | cut -d: -f1)
+    local end_m=$(echo "$end_time" | cut -d: -f2)
+
+    # Validate hours and minutes
+    if [ "$start_h" -gt 23 ] || [ "$end_h" -gt 23 ]; then
+        echo "Error: Hours must be between 00 and 23" >&2
+        return 1
+    fi
+
+    # Set the schedule
+    set_config_value "start_time" "\"$start_time\""
+    set_config_value "end_time" "\"$end_time\""
+
+    echo "Schedule set: Enable at $start_time, disable at $end_time"
+}
+
+# Function to check if current time is within schedule
+is_within_schedule() {
+    local start_time=$(get_config_value "start_time")
+    local end_time=$(get_config_value "end_time")
+    local current_time=$(date +%H:%M)
+
+    # Convert times to minutes for comparison
+    local start_minutes=$(($(echo "$start_time" | cut -d: -f1) * 60 + $(echo "$start_time" | cut -d: -f2)))
+    local end_minutes=$(($(echo "$end_time" | cut -d: -f1) * 60 + $(echo "$end_time" | cut -d: -f2)))
+    local current_minutes=$(($(echo "$current_time" | cut -d: -f1) * 60 + $(echo "$current_time" | cut -d: -f2)))
+
+    # Handle overnight schedules (e.g., 22:00 to 06:00)
+    if [ "$start_minutes" -gt "$end_minutes" ]; then
+        # Overnight schedule
+        if [ "$current_minutes" -ge "$start_minutes" ] || [ "$current_minutes" -lt "$end_minutes" ]; then
+            return 0  # Within schedule
+        fi
+    else
+        # Same day schedule
+        if [ "$current_minutes" -ge "$start_minutes" ] && [ "$current_minutes" -lt "$end_minutes" ]; then
+            return 0  # Within schedule
+        fi
+    fi
+    return 1  # Not within schedule
+}
+
+# Function to apply configuration on startup
+apply_config() {
+    ensure_config_exists
+
+    local automatic=$(get_config_value "automatic")
+    local resume_on_startup=$(get_config_value "resume_on_startup")
+    local config_enabled=$(get_config_value "enabled")
+
+    if [ "$automatic" = "true" ]; then
+        # Check if we should be enabled based on schedule
+        if is_within_schedule; then
+            if [ "$config_enabled" != "true" ]; then
+                enable_effect > /dev/null
+            fi
+        else
+            if [ "$config_enabled" = "true" ]; then
+                disable_effect > /dev/null
+            fi
+        fi
+    elif [ "$resume_on_startup" = "true" ] && [ "$config_enabled" = "true" ]; then
+        # Resume previous state
+        enable_effect > /dev/null
+    fi
+}
+
+# Main command processing
+case "$1" in
+    on|enable)
+        enable_effect
+        echo "Desaturation effect enabled"
+        ;;
+    off|disable)
+        disable_effect
+        echo "Desaturation effect disabled"
+        ;;
+    toggle)
+        toggle_effect
+        ;;
+    status)
+        show_status
+        ;;
+    saturation)
+        if [ -z "$2" ]; then
+            echo "Error: Saturation value required" >&2
+            exit 1
+        fi
+        set_saturation "$2"
+        ;;
+    auto|automatic)
+        if [ -z "$2" ]; then
+            echo "Error: Mode required (on/off)" >&2
+            exit 1
+        fi
+        set_automatic "$2"
+        ;;
+    schedule)
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Error: Start and end times required (HH:MM format)" >&2
+            exit 1
+        fi
+        set_schedule "$2" "$3"
+        ;;
+    init)
+        apply_config
+        echo "Configuration applied"
+        ;;
+    test)
+        echo "Testing effect detection..."
+        status=$(check_effect_status)
+        echo "Effect status: $status"
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    "")
+        # No command specified - apply config and show status
+        apply_config
+        show_status
+        ;;
+    *)
+        echo "Error: Unknown command '$1'" >&2
+        show_help
+        exit 1
+        ;;
+esac
