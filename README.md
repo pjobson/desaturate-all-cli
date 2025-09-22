@@ -20,6 +20,7 @@ A command-line interface for controlling screen desaturation effects in the Cinn
 - `bc` for saturation calculations
 
 Install dependencies:
+
 ```bash
 sudo apt install jq bc
 ```
@@ -28,23 +29,23 @@ sudo apt install jq bc
 
 1. **Make the script executable:**
 
-    chmod +x desaturate-cli
+        chmod +x desaturate-cli
 
 2. **Install globally (recommended):**
 
-    # Install to user directory
-    ./install-cli.sh
-    
-    # Or install system-wide (requires sudo)
-    ./install-cli.sh --global
+        # Install to user directory
+        ./install-cli.sh
+        
+        # Or install system-wide (requires sudo)
+        ./install-cli.sh --global
 
 3. **Add to PATH (if installing manually):**
 
-    # Copy to local bin directory
-    cp desaturate-cli ~/.local/bin/
-    
-    # Or create a symlink
-    ln -s "$(pwd)/desaturate-cli" ~/.local/bin/desaturate-cli
+        # Copy to local bin directory
+        cp desaturate-cli ~/.local/bin/
+        
+        # Or create a symlink
+        ln -s "$(pwd)/desaturate-cli" ~/.local/bin/desaturate-cli
 
 ## Usage
 
