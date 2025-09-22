@@ -57,9 +57,11 @@ Commands:
     off                 Disable desaturation effect
     toggle              Toggle desaturation effect
     status              Show current status
-    saturation <value>  Set saturation level (0-100)
+    saturation <value> [duration]  Set saturation level (0-100, supports decimals)
+                                   Optional duration in seconds for gradual fade
     auto on|off         Enable/disable automatic scheduling
     schedule <start> <end>  Set automatic schedule (24h format: HH:MM)
+    unschedule          Remove automatic schedule from crontab
     init                Apply configuration settings
     test                Test effect detection
     help                Show this help message
@@ -69,8 +71,11 @@ Examples:
     $0 off              # Disable desaturation
     $0 toggle           # Toggle current state
     $0 saturation 50    # Set 50% saturation
+    $0 saturation 25.5  # Set 25.5% saturation
+    $0 saturation 0 5   # Fade to grayscale over 5 seconds
     $0 auto on          # Enable automatic scheduling
     $0 schedule 22:00 06:00  # Auto-enable at 22:00, disable at 06:00
+    $0 unschedule       # Remove automatic schedule from crontab
 
 EOF
 }
@@ -212,6 +217,7 @@ disable_effect() {
 
     # Save state to config
     set_config_value "enabled" "false"
+    set_config_value "saturation" "100"
 }
 
 # Function to check if effect is currently running
@@ -286,21 +292,128 @@ show_status() {
     fi
 }
 
+# Function to gradually fade saturation over time
+fade_saturation() {
+    local target_value="$1"
+    local duration="$2"
+    local current_value=$(get_config_value "saturation")
+
+    echo "Fading from ${current_value}% to ${target_value}% over ${duration} seconds..."
+
+    # Use a single JavaScript execution that handles the entire fade internally
+    local js_code="
+    try {
+        const Clutter = imports.gi.Clutter;
+        const Main = imports.ui.main;
+        const Mainloop = imports.mainloop;
+
+        // Configuration
+        const startSaturation = ${current_value};
+        const targetSaturation = ${target_value};
+        const durationMs = ${duration} * 1000;
+        const steps = 60; // 60 FPS for smooth animation
+        const stepDelay = Math.max(16, durationMs / steps); // At least 16ms per frame
+        const totalSteps = Math.floor(durationMs / stepDelay);
+
+        // Remove any existing effects first
+        let effects = Main.uiGroup.get_effects();
+        for (let i = effects.length - 1; i >= 0; i--) {
+            if (effects[i] instanceof Clutter.DesaturateEffect) {
+                Main.uiGroup.remove_effect(effects[i]);
+            }
+        }
+
+        // Create and add new effect
+        let desaturateEffect = new Clutter.DesaturateEffect();
+        let startFactor = (100 - startSaturation) / 100;
+        desaturateEffect.set_factor(startFactor);
+        Main.uiGroup.add_effect(desaturateEffect);
+
+        let currentStep = 0;
+
+        function updateFade() {
+            currentStep++;
+
+            // Calculate current saturation using easing
+            let progress = currentStep / totalSteps;
+            if (progress >= 1.0) {
+                progress = 1.0;
+            }
+
+            let currentSaturation = startSaturation + (targetSaturation - startSaturation) * progress;
+            let factor = (100 - currentSaturation) / 100;
+
+            // Update the effect
+            desaturateEffect.set_factor(factor);
+
+            // Continue animation or finish
+            if (progress < 1.0) {
+                return Mainloop.timeout_add(stepDelay, updateFade);
+            } else {
+                log('Fade animation complete: ' + targetSaturation + '%');
+                return false; // Stop the timeout
+            }
+        }
+
+        // Start the animation
+        log('Starting fade animation from ' + startSaturation + '% to ' + targetSaturation + '% over ' + durationMs + 'ms');
+        Mainloop.timeout_add(stepDelay, updateFade);
+
+    } catch(e) {
+        log('Error in fade animation: ' + e);
+    }
+    "
+
+    execute_cinnamon_js "$js_code"
+
+    # Wait for the animation to complete, then save config
+    sleep "$duration"
+    set_config_value "saturation" "$target_value"
+    set_config_value "enabled" "true"
+    echo "Fade complete: Saturation set to ${target_value}%"
+}
+
 # Function to set saturation
 set_saturation() {
     local value="$1"
-    if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 0 ] || [ "$value" -gt 100 ]; then
+    local duration="$2"
+
+    # Validate floating point number format and range
+    if [[ ! "$value" =~ ^[0-9]+\.?[0-9]*$ ]] && [[ ! "$value" =~ ^[0-9]*\.[0-9]+$ ]]; then
         echo "Error: Saturation must be a number between 0 and 100" >&2
         return 1
     fi
 
-    # Save to config first
-    set_config_value "saturation" "$value"
+    # Use bc for floating point comparison
+    if [ "$(echo "$value < 0" | bc -l)" -eq 1 ] || [ "$(echo "$value > 100" | bc -l)" -eq 1 ]; then
+        echo "Error: Saturation must be a number between 0 and 100" >&2
+        return 1
+    fi
 
-    # Always enable the effect when setting saturation
-    enable_effect > /dev/null
+    # If duration is specified, use fade effect
+    if [ -n "$duration" ]; then
+        # Validate duration
+        if [[ ! "$duration" =~ ^[0-9]+\.?[0-9]*$ ]] && [[ ! "$duration" =~ ^[0-9]*\.[0-9]+$ ]]; then
+            echo "Error: Duration must be a positive number (seconds)" >&2
+            return 1
+        fi
 
-    echo "Saturation set to ${value}% and effect enabled"
+        if [ "$(echo "$duration <= 0" | bc -l)" -eq 1 ]; then
+            echo "Error: Duration must be greater than 0" >&2
+            return 1
+        fi
+
+        fade_saturation "$value" "$duration"
+    else
+        # Immediate saturation change
+        # Save to config first
+        set_config_value "saturation" "$value"
+
+        # Always enable the effect when setting saturation
+        enable_effect > /dev/null
+
+        echo "Saturation set to ${value}% and effect enabled"
+    fi
 }
 
 # Function to set automatic mode
@@ -320,6 +433,47 @@ set_automatic() {
             return 1
             ;;
     esac
+}
+
+# Function to setup crontab entries for automatic scheduling
+setup_crontab() {
+    local start_time="$1"
+    local end_time="$2"
+    local script_path="$(realpath "$0")"
+
+    # Extract hours and minutes
+    local start_h=$(echo "$start_time" | cut -d: -f1)
+    local start_m=$(echo "$start_time" | cut -d: -f2)
+    local end_h=$(echo "$end_time" | cut -d: -f1)
+    local end_m=$(echo "$end_time" | cut -d: -f2)
+
+    # Remove leading zeros to avoid octal interpretation
+    start_h=$((10#$start_h))
+    start_m=$((10#$start_m))
+    end_h=$((10#$end_h))
+    end_m=$((10#$end_m))
+
+    # Get current crontab and remove any existing desaturate-cli entries
+    local temp_cron=$(mktemp)
+    crontab -l 2>/dev/null | grep -v "desaturate-cli" > "$temp_cron" || true
+
+    # Add new crontab entries
+    echo "# Desaturate-cli automatic scheduling" >> "$temp_cron"
+    echo "$start_m $start_h * * * $script_path on >/dev/null 2>&1" >> "$temp_cron"
+    echo "$end_m $end_h * * * $script_path off >/dev/null 2>&1" >> "$temp_cron"
+
+    # Install the new crontab
+    crontab "$temp_cron"
+    rm "$temp_cron"
+}
+
+# Function to remove crontab entries
+remove_crontab() {
+    local temp_cron=$(mktemp)
+    crontab -l 2>/dev/null | grep -v "desaturate-cli" > "$temp_cron" || true
+    crontab "$temp_cron"
+    rm "$temp_cron"
+    echo "Crontab entries removed"
 }
 
 # Function to set schedule
@@ -349,7 +503,11 @@ set_schedule() {
     set_config_value "start_time" "\"$start_time\""
     set_config_value "end_time" "\"$end_time\""
 
+    # Create crontab entries for automatic scheduling
+    setup_crontab "$start_time" "$end_time"
+
     echo "Schedule set: Enable at $start_time, disable at $end_time"
+    echo "Crontab entries created for automatic scheduling"
 }
 
 # Function to check if current time is within schedule
@@ -424,7 +582,12 @@ case "$1" in
             echo "Error: Saturation value required" >&2
             exit 1
         fi
-        set_saturation "$2"
+        # Check for optional duration parameter
+        if [ -n "$3" ]; then
+            set_saturation "$2" "$3"
+        else
+            set_saturation "$2"
+        fi
         ;;
     auto|automatic)
         if [ -z "$2" ]; then
@@ -439,6 +602,9 @@ case "$1" in
             exit 1
         fi
         set_schedule "$2" "$3"
+        ;;
+    unschedule)
+        remove_crontab
         ;;
     init)
         apply_config
